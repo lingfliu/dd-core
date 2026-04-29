@@ -1,0 +1,34 @@
+server:
+  listen_addr: ":8080"
+
+mq:
+  provider: "mqtt"
+  mqtt:
+    broker_url: "tcp://localhost:1883"
+    client_id: "dd-core-hub"
+    username: ""
+    password: ""
+
+tenant: "default"
+
+sync:
+  default_timeout_ms: 3000
+
+discovery:
+  heartbeat_interval_sec: 10
+  lease_ttl_sec: 30
+
+acl:
+  rules:
+    - peer_id: "*"
+      action: "pub"
+      pattern: "dd/default/transfer/#"
+      allow: true
+    - peer_id: "*"
+      action: "sub"
+      pattern: "dd/default/transfer/#"
+      allow: true
+
+logging:
+  level: "info"
+  format: "json"
