@@ -626,3 +626,36 @@ sequenceDiagram
 1. 阶段 1：先实现只读查询（HTTP/MQTT/CoAP 三类列表与详情）；
 2. 阶段 2：接入 `request_meta_schema` 展示与校验结果；
 3. 阶段 3：增加运行期统计（最近错误、可用性、时延分位）并与路由决策联动。
+
+---
+
+## 15. 与 `plan-v.1.3.md` §11 最终交付摘要的对照索引
+
+开发计划在 **[plan-v.1.3.md §11（v1.3 最终交付摘要）](plan-v.1.3.md#11-v13-最终交付摘要归档)** 中给出了版本结论、按 Wave 的交付物摘要、测试门禁与发布判定。以下内容将本设计文档章节与 §11 中的落地项一一对应，便于评审与追溯。
+
+| 本设计章节 | §11 / 实现侧要点 | 主要代码或入口 |
+|---|---|---|
+| §4 P1 异步关联响应 | `SendSyncAsync`；默认 `reply_to=dd/{tenant}/transfer/response/{request_id}`；订阅 `transfer/+/response` 与 `transfer/response/+` | `internal/service/dd_data_service.go`，`internal/service/topics.go`，`cmd/main.go`，`api/handler.go` |
+| §5 体积与 Topic Alias | 全信封 gzip；MQTT QoS 分层；应用层 Topic Alias PoC（transfer 精确 topic）；Broker 原生 MQTT5 Alias 列为后续 | `internal/model/dd_message_codec.go`，`internal/mq/mqtt_client.go`，`internal/config/config.go`，`config.yaml` |
+| §6 混合路由 | `route_mode`；同节点 HTTP/CoAP direct，失败回退 broker | `internal/service/route_decision.go`，`api/handler.go`，`cmd/main.go` |
+| §7 QoS 分层 | 按 topic 模式选择 QoS 0/1 | `internal/mq/mqtt_client.go` |
+| §12 DdMessage | `version` / `meta` / `protocol_meta`，`Normalize()`，协议字段白名单 | `internal/model/dd_message.go` |
+| §13 DdPeer 声明式 meta | schema 上报与存储；transfer 入口校验；Hub 多 provider schema 聚合 | `internal/model/dd_peer_info.go`，`internal/service/peer_registry_service.go`，`api/handler.go` |
+| §14 协议资源 API | `/protocol-resources/*`；`runtime_stats`；`dd_protocol_resource_query_total` | `internal/service/protocol_resource_index.go`，`api/handler.go`，`api/router.go`，`internal/observability/metrics.go` |
+
+**Wave 5 可靠性 / 性能补充（analysis 映射，§11 摘要中亦有归纳）**
+
+| 主题 | 说明 | 主要代码或入口 |
+|---|---|---|
+| Bridge 加固 | 入站校验、重试、熔断、DLQ、指标 | `internal/adapter/http_bridge.go`，`internal/adapter/coap_bridge.go`，`internal/adapter/mqtt_bridge.go`，`internal/service/topics.go` |
+| MQTT TLS | mTLS 可选配置 | `internal/mq/mqtt_client.go`，`internal/config/config.go`，`cmd/main.go`，`config.yaml` |
+| trace | API → 数据面 → Bridge 响应透传 | `api/handler.go`，`internal/service/dd_data_service.go`，各 bridge |
+| 批量异步 PoC | `POST /transfer/async/batch` | `api/handler.go`，`api/router.go` |
+| CoAP 并发与 MTU | worker pool + 有界队列；payload 上限保护 | `internal/adapter/coap_bridge.go` |
+| 服务层锁 | 热点读路径 `RWMutex` | `internal/service/dd_data_service.go` |
+
+**后续增强（§11 与 §10.1 已标明，不阻塞 v1.3）**
+
+- Broker 原生 MQTT 5.0 Topic Alias；
+- 跨节点 direct 策略与安全边界；
+- CoAP 长连接池化（analysis 3.2）与更深度的压测优化。

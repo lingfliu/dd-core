@@ -88,7 +88,7 @@ func TestCoapBridgeSyncRequest(t *testing.T) {
 	responseTopic := "dd/default/transfer/coap-peer/response"
 	if err := mock.Subscribe(context.Background(), responseTopic, func(_ string, payload []byte) {
 		var msg model.DdMessage
-		json.Unmarshal(payload, &msg)
+		model.DecodeDdMessage(payload, &msg)
 		responseCh <- &msg
 	}); err != nil {
 		t.Fatalf("subscribe response failed: %v", err)
@@ -162,5 +162,44 @@ func TestCoapBridgeProtocol(t *testing.T) {
 	bridge := NewCoapBridge(mq.NewMockClient(), service.NewDefaultTopicSet("t"), "p1", "127.0.0.1:5683")
 	if bridge.Protocol() != model.DdProtocolCoap {
 		t.Fatalf("expected coap protocol, got %s", bridge.Protocol())
+	}
+}
+
+func TestEncodeCoapOptionUtf8Length(t *testing.T) {
+	// "测" is 3 bytes in UTF-8; old code used len(val)-1 by rune count and could break option length.
+	encoded := encodeCoapOption(11, "/a/测")
+	if len(encoded) == 0 {
+		t.Fatal("expected encoded option bytes")
+	}
+	// Ensure encoded payload includes full UTF-8 bytes.
+	if encoded[len(encoded)-3] == 0 && encoded[len(encoded)-2] == 0 && encoded[len(encoded)-1] == 0 {
+		t.Fatal("unexpected truncated utf8 bytes")
+	}
+}
+
+func TestParseCoapPayloadOptionLengthZero(t *testing.T) {
+	// CoAP response with empty option length nibble should still parse payload marker correctly.
+	resp := []byte{
+		0x60, 0x45, 0x00, 0x01, // header
+		0xB0, // option delta=11, length=0
+		0xFF, // payload marker
+		'o', 'k',
+	}
+	got := parseCoapPayload(resp)
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+}
+
+func TestCoapBridgeRejectsOversizedPayload(t *testing.T) {
+	bridge := NewCoapBridge(mq.NewMockClient(), service.NewDefaultTopicSet("default"), "coap-peer", "127.0.0.1:5683")
+	msg := &model.DdMessage{
+		Protocol: model.DdProtocolCoap,
+		Resource: "sensor.large",
+		Payload:  make([]byte, maxCoapPayloadBytes+1),
+	}
+	got := bridge.doCoap(msg)
+	if string(got) != `{"error":"coap_payload_too_large"}` {
+		t.Fatalf("expected payload too large error, got %s", string(got))
 	}
 }

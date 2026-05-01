@@ -131,6 +131,9 @@ func (s *PeerRegistryService) handleResourceReport(_ string, payload []byte) {
 		}
 	}
 	peer.Resources = resources
+	if len(evt.ResourceSchemas) > 0 {
+		peer.ResourceSchemas = evt.ResourceSchemas
+	}
 	peer.UpdatedAt = time.Now().UTC()
 	s.store.Set(evt.PeerId, peer)
 }
@@ -247,6 +250,95 @@ func (s *PeerRegistryService) QueryPeers(ctx context.Context, resource string, r
 
 func (s *PeerRegistryService) Store() registry.Store {
 	return s.store
+}
+
+func (s *PeerRegistryService) GetResourceMetaSchema(resource string) (model.ResourceMetaSchema, bool) {
+	peers := s.GetPeers(resource)
+	var merged model.ResourceMetaSchema
+	merged.Constraints = make(map[string]model.ResourceMetaConstraint)
+	seenRequired := make(map[string]struct{})
+	seenOptional := make(map[string]struct{})
+	seenProto := make(map[string]struct{})
+	found := false
+
+	for _, p := range peers {
+		if !containsString(p.Capabilities, "resource_meta_schema_v1") {
+			continue
+		}
+		if p.ResourceSchemas == nil {
+			continue
+		}
+		if schema, ok := p.ResourceSchemas[resource]; ok {
+			found = true
+			for _, f := range schema.Required {
+				if _, ok := seenRequired[f]; ok {
+					continue
+				}
+				seenRequired[f] = struct{}{}
+				merged.Required = append(merged.Required, f)
+			}
+			for _, f := range schema.Optional {
+				if _, ok := seenOptional[f]; ok {
+					continue
+				}
+				seenOptional[f] = struct{}{}
+				merged.Optional = append(merged.Optional, f)
+			}
+			for _, f := range schema.ProtocolMetaRequired {
+				if _, ok := seenProto[f]; ok {
+					continue
+				}
+				seenProto[f] = struct{}{}
+				merged.ProtocolMetaRequired = append(merged.ProtocolMetaRequired, f)
+			}
+			for field, c := range schema.Constraints {
+				existing, exists := merged.Constraints[field]
+				if !exists {
+					merged.Constraints[field] = c
+					continue
+				}
+				merged.Constraints[field] = mergeConstraint(existing, c)
+			}
+		}
+	}
+	if !found {
+		return model.ResourceMetaSchema{}, false
+	}
+	return merged, true
+}
+
+func mergeConstraint(a, b model.ResourceMetaConstraint) model.ResourceMetaConstraint {
+	out := a
+	if b.Min != nil {
+		if out.Min == nil || *b.Min > *out.Min {
+			v := *b.Min
+			out.Min = &v
+		}
+	}
+	if b.Max != nil {
+		if out.Max == nil || *b.Max < *out.Max {
+			v := *b.Max
+			out.Max = &v
+		}
+	}
+	if len(a.Enum) > 0 && len(b.Enum) > 0 {
+		set := make(map[string]struct{}, len(b.Enum))
+		for _, v := range b.Enum {
+			set[v] = struct{}{}
+		}
+		inter := make([]string, 0, len(a.Enum))
+		for _, v := range a.Enum {
+			if _, ok := set[v]; ok {
+				inter = append(inter, v)
+			}
+		}
+		out.Enum = inter
+		return out
+	}
+	if len(out.Enum) == 0 && len(b.Enum) > 0 {
+		out.Enum = append([]string(nil), b.Enum...)
+	}
+	return out
 }
 
 func (s *PeerRegistryService) syncPeerMetrics() {

@@ -54,10 +54,24 @@ type MqConfig struct {
 }
 
 type MqttConfig struct {
-	BrokerUrl string `yaml:"broker_url" json:"broker_url"`
-	ClientId  string `yaml:"client_id" json:"client_id"`
-	Username  string `yaml:"username" json:"username"`
-	Password  string `yaml:"password" json:"password"`
+	BrokerUrl  string           `yaml:"broker_url" json:"broker_url"`
+	ClientId   string           `yaml:"client_id" json:"client_id"`
+	Username   string           `yaml:"username" json:"username"`
+	Password   string           `yaml:"password" json:"password"`
+	TLS        TLSConfig        `yaml:"tls" json:"tls"`
+	TopicAlias TopicAliasConfig `yaml:"topic_alias" json:"topic_alias"`
+}
+
+type TLSConfig struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	CaCertFile         string `yaml:"ca_cert_file" json:"ca_cert_file"`
+	ClientCertFile     string `yaml:"client_cert_file" json:"client_cert_file"`
+	ClientKeyFile      string `yaml:"client_key_file" json:"client_key_file"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify" json:"insecure_skip_verify"`
+}
+
+type TopicAliasConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 type BridgeConfig struct {
@@ -213,6 +227,18 @@ func mergeInto(base, override *Config) {
 	if override.Mq.Mqtt.Password != "" {
 		base.Mq.Mqtt.Password = override.Mq.Mqtt.Password
 	}
+	base.Mq.Mqtt.TLS.Enabled = base.Mq.Mqtt.TLS.Enabled || override.Mq.Mqtt.TLS.Enabled
+	if override.Mq.Mqtt.TLS.CaCertFile != "" {
+		base.Mq.Mqtt.TLS.CaCertFile = override.Mq.Mqtt.TLS.CaCertFile
+	}
+	if override.Mq.Mqtt.TLS.ClientCertFile != "" {
+		base.Mq.Mqtt.TLS.ClientCertFile = override.Mq.Mqtt.TLS.ClientCertFile
+	}
+	if override.Mq.Mqtt.TLS.ClientKeyFile != "" {
+		base.Mq.Mqtt.TLS.ClientKeyFile = override.Mq.Mqtt.TLS.ClientKeyFile
+	}
+	base.Mq.Mqtt.TLS.InsecureSkipVerify = base.Mq.Mqtt.TLS.InsecureSkipVerify || override.Mq.Mqtt.TLS.InsecureSkipVerify
+	base.Mq.Mqtt.TopicAlias.Enabled = base.Mq.Mqtt.TopicAlias.Enabled || override.Mq.Mqtt.TopicAlias.Enabled
 	if override.Sync.DefaultTimeoutMs > 0 {
 		base.Sync.DefaultTimeoutMs = override.Sync.DefaultTimeoutMs
 	}
@@ -319,6 +345,24 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("DD_MQTT_PASSWORD"); v != "" {
 		cfg.Mq.Mqtt.Password = v
+	}
+	if v := os.Getenv("DD_MQTT_TLS_ENABLED"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.Mq.Mqtt.TLS.Enabled = true
+	}
+	if v := os.Getenv("DD_MQTT_TLS_CA_CERT_FILE"); v != "" {
+		cfg.Mq.Mqtt.TLS.CaCertFile = v
+	}
+	if v := os.Getenv("DD_MQTT_TLS_CLIENT_CERT_FILE"); v != "" {
+		cfg.Mq.Mqtt.TLS.ClientCertFile = v
+	}
+	if v := os.Getenv("DD_MQTT_TLS_CLIENT_KEY_FILE"); v != "" {
+		cfg.Mq.Mqtt.TLS.ClientKeyFile = v
+	}
+	if v := os.Getenv("DD_MQTT_TLS_INSECURE_SKIP_VERIFY"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.Mq.Mqtt.TLS.InsecureSkipVerify = true
+	}
+	if v := os.Getenv("DD_MQTT_TOPIC_ALIAS_ENABLED"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.Mq.Mqtt.TopicAlias.Enabled = true
 	}
 	if v := os.Getenv("DD_TENANT"); v != "" {
 		cfg.Tenant = v

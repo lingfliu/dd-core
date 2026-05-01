@@ -8,6 +8,14 @@ mq:
     client_id: "dd-core-hub"
     username: ""
     password: ""
+    tls:
+      enabled: false
+      ca_cert_file: ""
+      client_cert_file: ""
+      client_key_file: ""
+      insecure_skip_verify: false
+    topic_alias:
+      enabled: false
 
 tenant: "default"
 

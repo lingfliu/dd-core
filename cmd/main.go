@@ -37,10 +37,16 @@ func main() {
 	)
 
 	mqClient, err := mq.NewMqttClient(mq.MqttConfig{
-		BrokerUrl: cfg.Mq.Mqtt.BrokerUrl,
-		ClientId:  cfg.Mq.Mqtt.ClientId,
-		Username:  cfg.Mq.Mqtt.Username,
-		Password:  cfg.Mq.Mqtt.Password,
+		BrokerUrl:          cfg.Mq.Mqtt.BrokerUrl,
+		ClientId:           cfg.Mq.Mqtt.ClientId,
+		Username:           cfg.Mq.Mqtt.Username,
+		Password:           cfg.Mq.Mqtt.Password,
+		TLSEnabled:         cfg.Mq.Mqtt.TLS.Enabled,
+		CaCertFile:         cfg.Mq.Mqtt.TLS.CaCertFile,
+		ClientCertFile:     cfg.Mq.Mqtt.TLS.ClientCertFile,
+		ClientKeyFile:      cfg.Mq.Mqtt.TLS.ClientKeyFile,
+		InsecureSkipVerify: cfg.Mq.Mqtt.TLS.InsecureSkipVerify,
+		TopicAliasEnabled:  cfg.Mq.Mqtt.TopicAlias.Enabled,
 	})
 	if err != nil {
 		slog.Error("failed to connect to MQTT broker", "error", err)
@@ -63,8 +69,16 @@ func main() {
 		time.Duration(cfg.Sync.DefaultTimeoutMs)*time.Millisecond,
 		service.WithDataAclService(aclService),
 	)
-
 	ctx := context.Background()
+	if err := dataService.SubscribeSyncResponses(ctx, topics.TransferResponseStream()); err != nil {
+		slog.Error("failed to subscribe sync response stream", "topic", topics.TransferResponseStream(), "error", err)
+		os.Exit(1)
+	}
+	if err := dataService.SubscribeSyncResponses(ctx, topics.TransferResponseByRequestStream()); err != nil {
+		slog.Error("failed to subscribe request response stream", "topic", topics.TransferResponseByRequestStream(), "error", err)
+		os.Exit(1)
+	}
+
 	if err := peerRegistry.Start(ctx); err != nil {
 		slog.Error("failed to start peer registry", "error", err)
 		os.Exit(1)
@@ -75,6 +89,13 @@ func main() {
 		slog.Error("failed to start stream service", "error", err)
 		os.Exit(1)
 	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			streamService.SweepIdle(now.UTC(), 15*time.Second)
+		}
+	}()
 
 	broadcastInterval := time.Duration(cfg.Peer.Broadcast.IntervalSec) * time.Second
 	if broadcastInterval <= 0 {
@@ -117,6 +138,8 @@ func main() {
 	}
 
 	resourceCatalog := service.NewResourceCatalog()
+	protocolResourceIndex := service.NewProtocolResourceIndex(cfg, topics, peerRegistry, resourceCatalog)
+	bridges := make([]adapter.ProtocolBridge, 0, 3)
 
 	if cfg.Bridges.Http.Enabled && cfg.Bridges.Http.TargetUrl != "" {
 		httpBridge := adapter.NewHttpBridge(mqClient, topics, cfg.Peer.Id, cfg.Bridges.Http.TargetUrl)
@@ -124,6 +147,7 @@ func main() {
 			slog.Error("failed to start http bridge", "error", err)
 			os.Exit(1)
 		}
+		bridges = append(bridges, httpBridge)
 		slog.Info("http bridge started", "peer_id", cfg.Peer.Id, "target_url", cfg.Bridges.Http.TargetUrl)
 	}
 
@@ -133,6 +157,7 @@ func main() {
 			slog.Error("failed to start coap bridge", "error", err)
 			os.Exit(1)
 		}
+		bridges = append(bridges, coapBridge)
 		slog.Info("coap bridge started", "peer_id", cfg.Peer.Id, "target_url", cfg.Bridges.Coap.TargetUrl)
 	}
 
@@ -146,10 +171,11 @@ func main() {
 			slog.Error("failed to start mqtt bridge", "error", err)
 			os.Exit(1)
 		}
+		bridges = append(bridges, mqttBridge)
 		slog.Info("mqtt bridge started", "mappings", len(mappings))
 	}
 
-	httpServer := api.NewServer(cfg, topics, peerRegistry, dataService, aclService, streamService, resourceCatalog)
+	httpServer := api.NewServer(cfg, topics, peerRegistry, dataService, aclService, streamService, resourceCatalog, protocolResourceIndex)
 
 	handler := observability.RequestLoggingMiddleware(httpServer.Handler())
 
@@ -186,6 +212,11 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
+	}
+	for _, bridge := range bridges {
+		if err := bridge.Stop(); err != nil {
+			slog.Warn("bridge stop failed", "protocol", bridge.Protocol(), "error", err)
+		}
 	}
 
 	slog.Info("dd-core stopped")

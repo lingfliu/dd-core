@@ -90,3 +90,109 @@ func TestPeerRegistrySweepStale(t *testing.T) {
 		t.Fatalf("expected stale peer filtered out, got %d", len(peers))
 	}
 }
+
+func TestPeerRegistryGetResourceMetaSchema(t *testing.T) {
+	mock := mq.NewMockClient()
+	topics := NewDefaultTopicSet("default")
+	registry := NewPeerRegistryService(mock, topics, time.Second)
+
+	peer := model.DdPeerInfo{
+		Id:           "peer-schema",
+		Name:         "schema-peer",
+		Role:         "edge",
+		Status:       model.PeerStatusActive,
+		Resources:    []string{"sensor.temp"},
+		Capabilities: []string{"resource_meta_schema_v1"},
+		ResourceSchemas: map[string]model.ResourceMetaSchema{
+			"sensor.temp": {
+				Required:             []string{"source_peer_id"},
+				ProtocolMetaRequired: []string{"method"},
+			},
+		},
+		LastHeartbeatAt: time.Now().UTC(),
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
+	}
+	registry.Store().Set(peer.Id, peer)
+
+	schema, ok := registry.GetResourceMetaSchema("sensor.temp")
+	if !ok {
+		t.Fatal("expected resource schema to exist")
+	}
+	if len(schema.Required) != 1 || schema.Required[0] != "source_peer_id" {
+		t.Fatalf("unexpected schema required fields: %+v", schema.Required)
+	}
+}
+
+func TestPeerRegistryGetResourceMetaSchemaAggregatesProviders(t *testing.T) {
+	mock := mq.NewMockClient()
+	topics := NewDefaultTopicSet("default")
+	registry := NewPeerRegistryService(mock, topics, time.Second)
+
+	minA := int64(100)
+	maxA := int64(2000)
+	minB := int64(300)
+	maxB := int64(1500)
+	now := time.Now().UTC()
+
+	registry.Store().Set("peer-a", model.DdPeerInfo{
+		Id:           "peer-a",
+		Status:       model.PeerStatusActive,
+		Resources:    []string{"sensor.temp"},
+		Capabilities: []string{"resource_meta_schema_v1"},
+		ResourceSchemas: map[string]model.ResourceMetaSchema{
+			"sensor.temp": {
+				Required:             []string{"source_peer_id"},
+				ProtocolMetaRequired: []string{"method"},
+				Constraints: map[string]model.ResourceMetaConstraint{
+					"timeout_ms": {Min: &minA, Max: &maxA},
+					"method":     {Enum: []string{"GET", "POST"}},
+				},
+			},
+		},
+		LastHeartbeatAt: now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+	registry.Store().Set("peer-b", model.DdPeerInfo{
+		Id:           "peer-b",
+		Status:       model.PeerStatusActive,
+		Resources:    []string{"sensor.temp"},
+		Capabilities: []string{"resource_meta_schema_v1"},
+		ResourceSchemas: map[string]model.ResourceMetaSchema{
+			"sensor.temp": {
+				Required:             []string{"target_peer_id"},
+				ProtocolMetaRequired: []string{"path"},
+				Constraints: map[string]model.ResourceMetaConstraint{
+					"timeout_ms": {Min: &minB, Max: &maxB},
+					"method":     {Enum: []string{"POST", "PUT"}},
+				},
+			},
+		},
+		LastHeartbeatAt: now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+
+	schema, ok := registry.GetResourceMetaSchema("sensor.temp")
+	if !ok {
+		t.Fatal("expected aggregated schema")
+	}
+	if !containsString(schema.Required, "source_peer_id") || !containsString(schema.Required, "target_peer_id") {
+		t.Fatalf("required fields not aggregated: %+v", schema.Required)
+	}
+	if !containsString(schema.ProtocolMetaRequired, "method") || !containsString(schema.ProtocolMetaRequired, "path") {
+		t.Fatalf("protocol meta required not aggregated: %+v", schema.ProtocolMetaRequired)
+	}
+	timeout := schema.Constraints["timeout_ms"]
+	if timeout.Min == nil || *timeout.Min != 300 {
+		t.Fatalf("expected merged min=300, got %+v", timeout.Min)
+	}
+	if timeout.Max == nil || *timeout.Max != 1500 {
+		t.Fatalf("expected merged max=1500, got %+v", timeout.Max)
+	}
+	method := schema.Constraints["method"]
+	if len(method.Enum) != 1 || method.Enum[0] != "POST" {
+		t.Fatalf("expected enum intersection [POST], got %+v", method.Enum)
+	}
+}

@@ -42,6 +42,18 @@ func (t TopicSet) TransferResponse(resource string) string {
 	return fmt.Sprintf("dd/%s/transfer/%s/response", t.tenant, resource)
 }
 
+func (t TopicSet) TransferResponseByRequest(requestID string) string {
+	return fmt.Sprintf("dd/%s/transfer/response/%s", t.tenant, requestID)
+}
+
+func (t TopicSet) TransferResponseStream() string {
+	return fmt.Sprintf("dd/%s/transfer/+/response", t.tenant)
+}
+
+func (t TopicSet) TransferResponseByRequestStream() string {
+	return fmt.Sprintf("dd/%s/transfer/response/+", t.tenant)
+}
+
 func (t TopicSet) EventPublish(resource string) string {
 	return fmt.Sprintf("dd/%s/event/%s/publish", t.tenant, resource)
 }
@@ -52,4 +64,8 @@ func (t TopicSet) StreamOpen(resource string) string {
 
 func (t TopicSet) StreamClose(resource string) string {
 	return fmt.Sprintf("dd/%s/stream/%s/close", t.tenant, resource)
+}
+
+func (t TopicSet) DlqBridge() string {
+	return fmt.Sprintf("dd/%s/dlq/bridge", t.tenant)
 }

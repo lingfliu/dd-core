@@ -31,6 +31,14 @@ var (
 		[]string{"resource", "status"},
 	)
 
+	AsyncBatchRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_async_batch_requests_total",
+			Help: "Total number of async batch publish requests.",
+		},
+		[]string{"status"},
+	)
+
 	PeerActiveCount = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dd_peer_active_count",
@@ -57,5 +65,54 @@ var (
 			Name: "dd_acl_denied_total",
 			Help: "Total number of ACL denied requests.",
 		},
+	)
+
+	BridgeRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_bridge_requests_total",
+			Help: "Total number of bridge requests by protocol/mode/status.",
+		},
+		[]string{"protocol", "mode", "status"},
+	)
+
+	BridgeLatencyMs = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "dd_bridge_latency_ms",
+			Help:    "Bridge request latency in milliseconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"protocol", "mode"},
+	)
+
+	BridgeRetriesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_bridge_retries_total",
+			Help: "Total number of bridge retry attempts.",
+		},
+		[]string{"protocol"},
+	)
+
+	ResourceMetaValidateTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_resource_meta_validate_total",
+			Help: "Total number of resource meta schema validations.",
+		},
+		[]string{"resource", "result"},
+	)
+
+	RouteDecisionTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_route_decision_total",
+			Help: "Total number of route decisions by mode.",
+		},
+		[]string{"mode"},
+	)
+
+	ProtocolResourceQueryTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dd_protocol_resource_query_total",
+			Help: "Total number of protocol resource query requests.",
+		},
+		[]string{"protocol", "mode"},
 	)
 )

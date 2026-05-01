@@ -34,7 +34,7 @@ func TestHttpBridgeSyncRequest(t *testing.T) {
 	responseTopic := "dd/default/transfer/peer-a/response"
 	if err := mock.Subscribe(context.Background(), responseTopic, func(_ string, payload []byte) {
 		var msg model.DdMessage
-		json.Unmarshal(payload, &msg)
+		model.DecodeDdMessage(payload, &msg)
 		responseCh <- &msg
 	}); err != nil {
 		t.Fatalf("subscribe response failed: %v", err)
@@ -66,6 +66,9 @@ func TestHttpBridgeSyncRequest(t *testing.T) {
 	case resp := <-responseCh:
 		if resp.Header.CorrelationId != "req-1" {
 			t.Fatalf("expected correlation_id=req-1, got %s", resp.Header.CorrelationId)
+		}
+		if resp.Headers["http-status"] != "200" {
+			t.Fatalf("expected http-status=200, got %s", resp.Headers["http-status"])
 		}
 		if string(resp.Payload) == "" {
 			t.Fatal("expected non-empty response payload")

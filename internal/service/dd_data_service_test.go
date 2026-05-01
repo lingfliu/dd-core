@@ -230,3 +230,131 @@ func TestAsyncTransferStatus(t *testing.T) {
 		t.Fatalf("expected accepted, got %s", rec.Status)
 	}
 }
+
+func TestSendSyncAsyncNonBlocking(t *testing.T) {
+	mock := mq.NewMockClient()
+	svc := NewDdDataService(mock, 500*time.Millisecond)
+
+	responseTopic := "dd/default/transfer/async-sync/response"
+	if err := svc.SubscribeSyncResponses(context.Background(), responseTopic); err != nil {
+		t.Fatalf("subscribe responses failed: %v", err)
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		resp := model.DdMessage{
+			Mode:     model.DdTransferModeSync,
+			Protocol: model.DdProtocolHttp,
+			Resource: "async-sync",
+			Header: model.DdHeader{
+				CorrelationId: "async-sync-1",
+			},
+			Payload: []byte(`{"ok":true}`),
+		}
+		raw, _ := json.Marshal(resp)
+		mock.Emit(responseTopic, raw)
+	}()
+
+	req := &model.DdMessage{
+		Protocol: model.DdProtocolHttp,
+		Resource: "async-sync",
+		Header: model.DdHeader{
+			RequestId: "async-sync-1",
+			TimeoutMs: 1000,
+		},
+	}
+
+	start := time.Now()
+	resultCh := svc.SendSyncAsync(context.Background(), "dd/default/transfer/async-sync/request", req)
+	if time.Since(start) > 10*time.Millisecond {
+		t.Fatal("SendSyncAsync should return immediately")
+	}
+
+	result := <-resultCh
+	if result.Err != nil {
+		t.Fatalf("SendSyncAsync failed: %v", result.Err)
+	}
+	if string(result.Response.Payload) != `{"ok":true}` {
+		t.Fatalf("unexpected payload: %s", string(result.Response.Payload))
+	}
+}
+
+func TestSubscribeSyncResponsesReplaceFullChannel(t *testing.T) {
+	mock := mq.NewMockClient()
+	svc := NewDdDataService(mock, 500*time.Millisecond)
+	responseTopic := "dd/default/transfer/race/response"
+	if err := svc.SubscribeSyncResponses(context.Background(), responseTopic); err != nil {
+		t.Fatalf("subscribe responses failed: %v", err)
+	}
+
+	waitCh := make(chan *model.DdMessage, 1)
+	waitCh <- &model.DdMessage{
+		Protocol: model.DdProtocolHttp,
+		Resource: "race",
+		Payload:  []byte("old"),
+	}
+	svc.pendingMu.Lock()
+	svc.pendingRequests["race-req-1"] = waitCh
+	svc.pendingMu.Unlock()
+
+	resp := model.DdMessage{
+		Mode:     model.DdTransferModeSync,
+		Protocol: model.DdProtocolHttp,
+		Resource: "race",
+		Header: model.DdHeader{
+			CorrelationId: "race-req-1",
+		},
+		Payload: []byte("new"),
+	}
+	raw, _ := json.Marshal(resp)
+	mock.Emit(responseTopic, raw)
+
+	select {
+	case got := <-waitCh:
+		if string(got.Payload) != "new" {
+			t.Fatalf("expected latest response in channel, got %s", string(got.Payload))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for replaced response")
+	}
+}
+
+func TestSendAsyncAutoTraceID(t *testing.T) {
+	mock := mq.NewMockClient()
+	svc := NewDdDataService(mock, time.Second)
+	msg := &model.DdMessage{
+		Protocol: model.DdProtocolMq,
+		Resource: "trace-test",
+		Header: model.DdHeader{
+			RequestId: "trace-req-1",
+		},
+	}
+	if err := svc.SendAsync(context.Background(), "dd/default/event/trace-test/publish", msg); err != nil {
+		t.Fatalf("SendAsync failed: %v", err)
+	}
+	if msg.Header.TraceId != "trace-req-1" {
+		t.Fatalf("expected trace_id to default request_id, got %s", msg.Header.TraceId)
+	}
+}
+
+func TestSendSyncBackpressureLimit(t *testing.T) {
+	mock := mq.NewMockClient()
+	svc := NewDdDataService(mock, time.Second)
+	svc.maxPendingRequests = 1
+	svc.pendingMu.Lock()
+	svc.pendingRequests["occupied"] = make(chan *model.DdMessage, 1)
+	svc.pendingMu.Unlock()
+
+	req := &model.DdMessage{
+		Protocol: model.DdProtocolHttp,
+		Resource: "bp",
+		Header: model.DdHeader{
+			RequestId: "bp-1",
+			TimeoutMs: 100,
+		},
+	}
+	_, err := svc.SendSync(context.Background(), "dd/default/transfer/bp/request", req)
+	if err == nil {
+		t.Fatal("expected backpressure error")
+	}
+}

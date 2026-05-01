@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -19,17 +18,25 @@ type idempotentEntry struct {
 	expireAt time.Time
 }
 
-type DdDataService struct {
-	mqClient        mq.Client
-	defaultTimeout  time.Duration
-	aclService      *TopicAclService
-	pendingMu       sync.Mutex
-	pendingRequests map[string]chan *model.DdMessage
+type SyncResult struct {
+	Response *model.DdMessage
+	Err      error
+}
 
-	idempotentMu   sync.Mutex
+type DdDataService struct {
+	mqClient           mq.Client
+	defaultTimeout     time.Duration
+	statusRetention    time.Duration
+	compressThreshold  int
+	maxPendingRequests int
+	aclService         *TopicAclService
+	pendingMu          sync.RWMutex
+	pendingRequests    map[string]chan *model.DdMessage
+
+	idempotentMu   sync.RWMutex
 	idempotentKeys map[string]idempotentEntry
 
-	statusMu         sync.Mutex
+	statusMu         sync.RWMutex
 	transferStatuses map[string]*model.TransferRecord
 }
 
@@ -43,16 +50,20 @@ func WithDataAclService(acl *TopicAclService) DdDataOption {
 
 func NewDdDataService(mqClient mq.Client, defaultTimeout time.Duration, opts ...DdDataOption) *DdDataService {
 	s := &DdDataService{
-		mqClient:         mqClient,
-		defaultTimeout:   defaultTimeout,
-		pendingRequests:  make(map[string]chan *model.DdMessage),
-		idempotentKeys:   make(map[string]idempotentEntry),
-		transferStatuses: make(map[string]*model.TransferRecord),
+		mqClient:           mqClient,
+		defaultTimeout:     defaultTimeout,
+		statusRetention:    30 * time.Minute,
+		compressThreshold:  128,
+		maxPendingRequests: 1024,
+		pendingRequests:    make(map[string]chan *model.DdMessage),
+		idempotentKeys:     make(map[string]idempotentEntry),
+		transferStatuses:   make(map[string]*model.TransferRecord),
 	}
 	for _, o := range opts {
 		o(s)
 	}
 	go s.sweepIdempotent()
+	go s.sweepTransferStatuses()
 	return s
 }
 
@@ -71,7 +82,7 @@ func (s *DdDataService) checkAcl(peerId string, action string, topic string) err
 func (s *DdDataService) SubscribeSyncResponses(ctx context.Context, responseTopic string) error {
 	return s.mqClient.Subscribe(ctx, responseTopic, func(_ string, payload []byte) {
 		var msg model.DdMessage
-		if err := json.Unmarshal(payload, &msg); err != nil {
+		if err := model.DecodeDdMessage(payload, &msg); err != nil {
 			return
 		}
 		reqId := msg.Header.CorrelationId
@@ -89,6 +100,16 @@ func (s *DdDataService) SubscribeSyncResponses(ctx context.Context, responseTopi
 			select {
 			case ch <- &msg:
 			default:
+				// If the waiter channel is full (late or duplicate responses),
+				// replace stale value with the latest response instead of silently dropping it.
+				select {
+				case <-ch:
+				default:
+				}
+				select {
+				case ch <- &msg:
+				default:
+				}
 			}
 		}
 	})
@@ -98,6 +119,7 @@ func (s *DdDataService) SendAsync(ctx context.Context, topic string, msg *model.
 	if msg == nil {
 		return model.ErrInvalidEnvelopeMsg("nil message")
 	}
+	msg.Normalize()
 
 	if err := s.checkAcl(msg.Header.SourcePeerId, "pub", topic); err != nil {
 		observability.AsyncPublishedTotal.WithLabelValues(msg.Resource, "denied").Inc()
@@ -112,7 +134,10 @@ func (s *DdDataService) SendAsync(ctx context.Context, topic string, msg *model.
 		observability.AsyncPublishedTotal.WithLabelValues(msg.Resource, "invalid").Inc()
 		return model.ErrInvalidEnvelopeMsg(err.Error())
 	}
-	data, err := json.Marshal(msg)
+	if msg.Header.TraceId == "" {
+		msg.Header.TraceId = msg.Header.RequestId
+	}
+	data, err := model.EncodeDdMessage(msg, s.shouldCompress(msg))
 	if err != nil {
 		return err
 	}
@@ -137,6 +162,7 @@ func (s *DdDataService) SendSync(
 	if msg == nil {
 		return nil, model.ErrInvalidEnvelopeMsg("nil message")
 	}
+	msg.Normalize()
 
 	if err := s.checkAcl(msg.Header.SourcePeerId, "pub", requestTopic); err != nil {
 		observability.SyncRequestsTotal.WithLabelValues(msg.Resource, "denied").Inc()
@@ -159,6 +185,9 @@ func (s *DdDataService) SendSync(
 	if msg.Header.RequestId == "" {
 		return nil, model.ErrInvalidEnvelopeMsg("request_id is required")
 	}
+	if msg.Header.TraceId == "" {
+		msg.Header.TraceId = msg.Header.RequestId
+	}
 	if err := msg.Validate(); err != nil {
 		return nil, model.ErrInvalidEnvelopeMsg(err.Error())
 	}
@@ -167,6 +196,10 @@ func (s *DdDataService) SendSync(
 
 	waitCh := make(chan *model.DdMessage, 1)
 	s.pendingMu.Lock()
+	if len(s.pendingRequests) >= s.maxPendingRequests {
+		s.pendingMu.Unlock()
+		return nil, model.NewDdError(model.ErrInternal, "sync pending backpressure limit reached")
+	}
 	if _, exists := s.pendingRequests[msg.Header.RequestId]; exists {
 		s.pendingMu.Unlock()
 		return nil, model.ErrDuplicateRequestMsg(msg.Header.RequestId)
@@ -181,7 +214,7 @@ func (s *DdDataService) SendSync(
 
 	s.recordStatus(msg.Header.RequestId, msg, model.TransferStatusRouted, 0)
 
-	data, err := json.Marshal(msg)
+	data, err := model.EncodeDdMessage(msg, s.shouldCompress(msg))
 	if err != nil {
 		s.recordStatus(msg.Header.RequestId, msg, model.TransferStatusFailed, 0)
 		return nil, err
@@ -217,15 +250,33 @@ func (s *DdDataService) SendSync(
 	}
 }
 
+func (s *DdDataService) shouldCompress(msg *model.DdMessage) bool {
+	return len(msg.Payload) >= s.compressThreshold
+}
+
+func (s *DdDataService) SendSyncAsync(
+	ctx context.Context,
+	requestTopic string,
+	msg *model.DdMessage,
+) <-chan SyncResult {
+	out := make(chan SyncResult, 1)
+	go func() {
+		resp, err := s.SendSync(ctx, requestTopic, msg)
+		out <- SyncResult{Response: resp, Err: err}
+		close(out)
+	}()
+	return out
+}
+
 func (s *DdDataService) PendingRequestCount() int {
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
+	s.pendingMu.RLock()
+	defer s.pendingMu.RUnlock()
 	return len(s.pendingRequests)
 }
 
 func (s *DdDataService) GetTransferStatus(requestId string) (*model.TransferRecord, bool) {
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
 	rec, ok := s.transferStatuses[requestId]
 	if !ok {
 		return nil, false
@@ -260,8 +311,8 @@ func (s *DdDataService) lookupIdempotent(msg *model.DdMessage) *model.DdMessage 
 	if msg.Header.IdempotencyKey == "" {
 		return nil
 	}
-	s.idempotentMu.Lock()
-	defer s.idempotentMu.Unlock()
+	s.idempotentMu.RLock()
+	defer s.idempotentMu.RUnlock()
 	entry, ok := s.idempotentKeys[msg.Header.IdempotencyKey]
 	if ok && time.Now().Before(entry.expireAt) {
 		return entry.response
@@ -297,13 +348,38 @@ func (s *DdDataService) sweepIdempotent() {
 			}
 		}
 		if len(s.idempotentKeys) > maxIdempotentKeys {
-			for key := range s.idempotentKeys {
-				delete(s.idempotentKeys, key)
-				if len(s.idempotentKeys) <= maxIdempotentKeys {
+			for len(s.idempotentKeys) > maxIdempotentKeys {
+				var oldestKey string
+				var oldestAt time.Time
+				first := true
+				for key, entry := range s.idempotentKeys {
+					if first || entry.expireAt.Before(oldestAt) {
+						oldestKey = key
+						oldestAt = entry.expireAt
+						first = false
+					}
+				}
+				if oldestKey == "" {
 					break
 				}
+				delete(s.idempotentKeys, oldestKey)
 			}
 		}
 		s.idempotentMu.Unlock()
+	}
+}
+
+func (s *DdDataService) sweepTransferStatuses() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.statusMu.Lock()
+		now := time.Now().UTC()
+		for requestID, rec := range s.transferStatuses {
+			if now.Sub(rec.UpdatedAt) > s.statusRetention {
+				delete(s.transferStatuses, requestID)
+			}
+		}
+		s.statusMu.Unlock()
 	}
 }

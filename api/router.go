@@ -21,6 +21,7 @@ type Server struct {
 	aclService      *service.TopicAclService
 	streamService   *service.StreamService
 	resourceCatalog *service.ResourceCatalog
+	protocolIndex   *service.ProtocolResourceIndex
 	startTime       time.Time
 }
 
@@ -32,6 +33,7 @@ func NewServer(
 	aclService *service.TopicAclService,
 	streamService *service.StreamService,
 	resourceCatalog *service.ResourceCatalog,
+	protocolIndex *service.ProtocolResourceIndex,
 ) *Server {
 	s := &Server{
 		cfg:             cfg,
@@ -42,6 +44,7 @@ func NewServer(
 		aclService:      aclService,
 		streamService:   streamService,
 		resourceCatalog: resourceCatalog,
+		protocolIndex:   protocolIndex,
 		startTime:       time.Now(),
 	}
 	s.registerRoutes()
@@ -59,10 +62,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET "+prefix+"/peers/{id}", s.handlePeerGet)
 	s.mux.HandleFunc("GET "+prefix+"/peers", s.handlePeersQuery)
 	s.mux.HandleFunc("GET "+prefix+"/resources/{resource}/providers", s.handleResourceProviders)
+	s.mux.HandleFunc("GET "+prefix+"/resources/{resource}/meta-schema", s.handleResourceMetaSchema)
 	s.mux.HandleFunc("GET "+prefix+"/resources", s.handleResourcesList)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/http", s.handleHTTPProtocolResources)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/http/{resource}", s.handleHTTPProtocolResourceByName)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/coap", s.handleCoapProtocolResources)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/coap/{resource}", s.handleCoapProtocolResourceByName)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/mqtt/topics", s.handleMqttProtocolTopics)
+	s.mux.HandleFunc("GET "+prefix+"/protocol-resources/mqtt/topics/{name}", s.handleMqttProtocolTopicByName)
 
 	s.mux.HandleFunc("POST "+prefix+"/transfer/sync", s.handleTransferSync)
 	s.mux.HandleFunc("POST "+prefix+"/transfer/async", s.handleTransferAsync)
+	s.mux.HandleFunc("POST "+prefix+"/transfer/async/batch", s.handleTransferAsyncBatch)
 	s.mux.HandleFunc("GET "+prefix+"/transfer/{requestId}", s.handleTransferStatus)
 	s.mux.HandleFunc("POST "+prefix+"/transfer/stream/open", s.handleStreamOpen)
 	s.mux.HandleFunc("POST "+prefix+"/transfer/stream/close", s.handleStreamClose)

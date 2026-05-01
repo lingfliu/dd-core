@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"dd-core/internal/model"
 	"dd-core/internal/mq"
+	"dd-core/internal/observability"
 )
 
 type MqttBridge struct {
@@ -31,6 +33,10 @@ func (b *MqttBridge) Protocol() model.DdProtocol {
 	return model.DdProtocolMq
 }
 
+func (b *MqttBridge) Stop() error {
+	return nil
+}
+
 func (b *MqttBridge) Start(ctx context.Context) error {
 	for i, m := range b.mappings {
 		source := m.Source
@@ -40,9 +46,11 @@ func (b *MqttBridge) Start(ctx context.Context) error {
 		targetPrefix := stripWildcard(target)
 
 		if err := b.mqClient.Subscribe(ctx, source, func(topic string, payload []byte) {
+			start := time.Now()
 			destTopic := strings.Replace(topic, sourcePrefix, targetPrefix, 1)
 
-			if err := b.mqClient.Publish(context.Background(), destTopic, payload); err != nil {
+			if err := b.mqClient.Publish(ctx, destTopic, payload); err != nil {
+				observability.BridgeRequestsTotal.WithLabelValues("mq", "async", "error").Inc()
 				slog.Warn("mqtt bridge forward failed",
 					"source", source,
 					"target", target,
@@ -51,6 +59,8 @@ func (b *MqttBridge) Start(ctx context.Context) error {
 				)
 				return
 			}
+			observability.BridgeRequestsTotal.WithLabelValues("mq", "async", "ok").Inc()
+			observability.BridgeLatencyMs.WithLabelValues("mq", "async").Observe(float64(time.Since(start).Milliseconds()))
 			slog.Info("mqtt bridge forwarded",
 				"source_topic", topic,
 				"dest_topic", destTopic,

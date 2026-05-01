@@ -20,6 +20,7 @@ type DdPeerResourceReportEvent struct {
 		Topics  []map[string]string `json:"topics"`
 		Streams []map[string]string `json:"streams"`
 	} `json:"resources"`
+	ResourceSchemas map[string]ResourceMetaSchema `json:"resource_meta_schemas,omitempty"`
 }
 
 type DdPeerQueryRequest struct {
